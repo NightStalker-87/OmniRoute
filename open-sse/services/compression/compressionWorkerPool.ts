@@ -27,7 +27,7 @@ const MAX_WALK_UP = 8;
  * This deliberately avoids `import.meta.url`/`__dirname` (both dead in the standalone
  * bundle) — see the LLMLingua worker comments in llmlingua/worker.ts.
  */
-function firstAncestorWith(anchors: string[], relPath: string): string | null {
+export function firstAncestorWith(anchors: string[], relPath: string): string | null {
   for (const anchor of anchors) {
     if (!anchor) continue;
     let dir = resolve(anchor);
@@ -60,9 +60,9 @@ function runtimeAnchors(): string[] {
  * Dev: the same relative path resolves to the `.ts` source under the project
  * root (cwd) and runs via the default Node.js loader.
  *
- * First existing candidate wins.
+ * First existing candidate wins. Exported for tests.
  */
-function resolveWorkerFile(): string {
+export function resolveWorkerFile(): string {
   const anchors = runtimeAnchors();
 
   // Prod first: the .js under the install root.
