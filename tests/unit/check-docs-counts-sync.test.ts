@@ -280,3 +280,113 @@ test("SVG gate ignores coordinates, sizes and unrelated small counts", () => {
   const r = checkSvg(noise, SVG_EXPECTED);
   assert.equal(r.ok, true, `coordinates/attrs must never register claims: ${r.detail}`);
 });
+
+// --- Auto-Combo scoring factors ------------------------------------------------------
+// The engine was described as 6-, 9-, 12-, 13- and 14-factor across the repo while
+// `DEFAULT_WEIGHTS` declared 15. The count is now read from the source of truth.
+
+import { parseScoringFactors } from "../../scripts/check/check-docs-counts-sync.mjs";
+
+const parseFactors = parseScoringFactors as (sourceText: string) => number;
+
+const WEIGHTS_SOURCE = `
+export const DEFAULT_WEIGHTS: ScoringWeights = {
+  quota: 0.1429,
+  health: 0.1605,
+  // A comment naming a decoy: fake: 0.5
+  cacheAffinity: 0,
+  /* block comment with another decoy: alsoFake: 0.2 */
+  quality: 0.03,
+};
+`;
+
+test("counts every factor DEFAULT_WEIGHTS declares, comments included as noise", () => {
+  assert.equal(parseFactors(WEIGHTS_SOURCE), 4);
+});
+
+test("a zero-weight factor still counts as declared", () => {
+  // `cacheAffinity` and `resetWindowAffinity` sit at 0 but are computed, and
+  // `cacheAffinity` gates prompt-cache dedup outside the score.
+  assert.ok(WEIGHTS_SOURCE.includes("cacheAffinity: 0"));
+  assert.equal(parseFactors(WEIGHTS_SOURCE.replace("cacheAffinity: 0,", "")), 3);
+});
+
+test("returns 0 rather than a wrong number when the source cannot be read", () => {
+  assert.equal(parseFactors(""), 0);
+  assert.equal(parseFactors("export const SOMETHING_ELSE = { a: 1 };"), 0);
+});
+
+test("scoring factor validator flags every stale count the repo carried", () => {
+  const v = makeValidator(15, { what: "scoring factors", pattern: /(\d+)[- ]factors?\b/gi });
+  assert.equal(v("a **15-factor** scoring function").ok, true);
+  assert.equal(v("scores every candidate on **15 factors**").ok, true);
+  assert.equal(v("a doc with no claim at all").ok, true);
+  for (const stale of ["6-factor", "9-factor", "12-factor", "13-factor", "14-factor"]) {
+    assert.equal(v(`the ${stale} scoring engine`).ok, false, `expected ${stale} to be flagged`);
+  }
+});
+
+// --- v3.8.51 hardening: rewritten-claim evasion + version prose ------------------
+// Regression guards for the 2026-08-31 audit: "56 recurring/keyless free-forever"
+// and "105-tool MCP server" dodged the original patterns, "149 versioned SQL
+// migration files" dodged the migrations pattern, and the README footer shipped
+// "v3.8.50" on a 3.8.51 tree with no gate reading it.
+import { makeVersionClaimValidator } from "../../scripts/check/check-docs-counts-sync.mjs";
+
+const makeVersionValidator = makeVersionClaimValidator as (
+  expected: string | null
+) => (content: string) => { ok: boolean; detail: string };
+
+test("free-forever gate catches the rewritten recurring/keyless form", () => {
+  const v = makeValidator(53, {
+    what: "free-forever providers",
+    pattern: /(\d+)(?:\s+recurring(?:\/|\s+or\s+)keyless)?\s+free[- ]forever/gi,
+  });
+  assert.equal(v("53 free forever").ok, true);
+  assert.equal(v("53 recurring/keyless free-forever providers").ok, true);
+  assert.equal(v("56 recurring or keyless free-forever providers").ok, false);
+  assert.equal(v("55 free-forever").ok, false);
+});
+
+test("migrations gate catches the 'versioned SQL migration files' form", () => {
+  const v = makeValidator(167, {
+    what: "migrations",
+    pattern: /(\d+)\+? (?:versioned )?(?:SQL )?migrations?\b/gi,
+  });
+  assert.equal(v("167 versioned SQL migration files").ok, true);
+  assert.equal(v("167 SQL migrations").ok, true);
+  assert.equal(v("149 versioned SQL migration files").ok, false);
+});
+
+test("MCP-tools gate catches the hyphenated N-tool form and skips phase numbers", () => {
+  const v = makeValidator(110, {
+    what: "MCP tools",
+    pattern: /(\d+)[- ]tools?\b/gi,
+    skipBefore: /(tools?|definitions?)\s*\(\s*$|phase\s+$/i,
+    skipAfter: /^\s*\(\d+ CLI/,
+  });
+  assert.equal(v("a 110-tool MCP server").ok, true);
+  assert.equal(v("a 105-tool MCP server").ok, false);
+  assert.equal(v("Phase 2 tool handlers (8 advanced tools)").ok, true);
+});
+
+test("recurring-pools gate skips the positive-budget subset", () => {
+  const v = makeValidator(38, {
+    what: "recurring pools",
+    pattern: /(\d+) (?:documented )?(?:recurring|free-tier) pool(?:s|(?:\s+keys))?\b/gi,
+    skipAfter: /^\s+with a published positive/i,
+  });
+  assert.equal(v("38 recurring pool keys").ok, true);
+  assert.equal(v("20 recurring pools with a published positive monthly budget").ok, true);
+  assert.equal(v("39 recurring pools").ok, false);
+});
+
+test("version gate compares README-footer and llm.txt prose against package.json", () => {
+  const v = makeVersionValidator("3.8.51");
+  assert.equal(v("OmniRoute v3.8.51 · Node ≥22.22.2").ok, true);
+  assert.equal(v("**Current version:** 3.8.51").ok, true);
+  assert.equal(v("OmniRoute v3.8.50 · Node ≥22.22.2").ok, false);
+  assert.equal(v("**Current version:** 3.8.50").ok, false);
+  assert.equal(v("no version here").ok, true);
+  assert.equal(makeVersionValidator(null)("anything").ok, false);
+});
